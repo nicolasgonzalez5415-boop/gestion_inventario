@@ -1,34 +1,40 @@
+import csv
+import os
+import numpy as np
+from datetime import datetime, timedelta
+import openpyxl
+import matplotlib.pyplot as plt
+from openpyxl.utils import get_column_letter
 import streamlit as st
 import pandas as pd
 import gspread
-from datetime import datetime, timedelta
-import matplotlib.pyplot as plt
-import numpy as np
+
+st.set_page_config(layout="wide", page_title="Inventario B&M")
+st.title("Sistema de Gestión de Inventario B&M")
+inventario_xls = 'inventario.xlsx'
+stock_minimo_xls  = 'stock_minimo.xlsx'
+movimientos_xls = 'movimientos.xlsx'
+
+inventario = {}
+stock_minimo = {}
+movimientos = []
+movimientos_headers = ["timestamp", "tipo", "codigo", "nombre", "cantidad", "fecha_vencimiento", "precio_costo", "precio_venta"]
+stock_minimo_headers = ['codigo', 'stock_min']
+inventario_headers = ["codigo", "nombre", "marca", "cantidad", "fecha_vencimiento", "precio_costo", "precio_venta"]
 
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(layout="wide", page_title="Inventario B&M")
 st.title("Sistema de Gestión de Inventario B&M (Google Sheets)")
 
 # --- CONFIGURACIÓN GOOGLE SHEETS ---
-# Nombre exacto de tu hoja de cálculo en Google Drive
-GOOGLE_SHEET_TITLE = "Inventario B&M" 
+# USAR ID EN LUGAR DE NOMBRE (Más seguro)
+# Extraído de tu link: docs.google.com/spreadsheets/d/1Zu-Dq6UCYRKMTWNsxj8FsMzzpAdtvl-qb40CVEmwl44/...
+GOOGLE_SHEET_ID = "1Zu-Dq6UCYRKMTWNsxj8FsMzzpAdtvl-qb40CVEmwl44"
 
 # Nombres de las pestañas
 INVENTARIO_WS = 'inventario'
 STOCK_MINIMO_WS = 'stock_minimo'
 MOVIMIENTOS_WS = 'movimientos'
-
-# Cabeceras
-inventario_headers = ["codigo", "nombre", "marca", "cantidad", "fecha_vencimiento", "precio_costo", "precio_venta"]
-stock_minimo_headers = ['codigo', 'stock_min']
-movimientos_headers = ["timestamp", "tipo", "codigo", "nombre", "cantidad", "fecha_vencimiento", "precio_costo", "precio_venta"]
-
-# Variables globales en memoria (usadas por el resto del script)
-inventario = {}
-stock_minimo = {}
-movimientos = []
-
-# --- CONEXIÓN Y FUNCIONES AUXILIARES ---
 
 @st.cache_resource(ttl=3600)
 def obtener_conexion():
@@ -37,56 +43,72 @@ def obtener_conexion():
         # Crea un diccionario con las credenciales desde secrets
         credentials = dict(st.secrets["gcp_service_account"])
         
+        # PARCHE CRÍTICO: Reemplazar saltos de línea literales por reales
+        # Esto soluciona errores de autenticación comunes en Streamlit
+        if "private_key" in credentials:
+            credentials["private_key"] = credentials["private_key"].replace("\\n", "\n")
+        
         # Autentica
         gc = gspread.service_account_from_dict(credentials)
         
-        # Abre la hoja
-        sh = gc.open(GOOGLE_SHEET_TITLE)
+        # Abre la hoja POR ID (Mucho más robusto que por título)
+        sh = gc.open_by_key(GOOGLE_SHEET_ID)
         return sh
     except Exception as e:
-        st.error(f"Error de conexión: {e}. Verifica que el bot tenga permiso de edición en la hoja '{GOOGLE_SHEET_TITLE}' y que los secrets estén bien pegados.")
+        st.error(f"Error de conexión: {e}. \n\nPosibles causas:\n1. El bot no tiene permiso de 'Editor' en la hoja.\n2. La API de Google Sheets no está habilitada.")
         st.stop()
 
-def check_worksheets(sh):
-    """Asegura que las pestañas existan y tengan headers"""
+def iniciarlizar_archivos():
     try:
-        titulos_actuales = [ws.title for ws in sh.worksheets()]
-        
-        if INVENTARIO_WS not in titulos_actuales:
-            ws = sh.add_worksheet(title=INVENTARIO_WS, rows=100, cols=10)
-            ws.append_row(inventario_headers)
-            
-        if STOCK_MINIMO_WS not in titulos_actuales:
-            ws = sh.add_worksheet(title=STOCK_MINIMO_WS, rows=100, cols=5)
-            ws.append_row(stock_minimo_headers)
-            
-        if MOVIMIENTOS_WS not in titulos_actuales:
-            ws = sh.add_worksheet(title=MOVIMIENTOS_WS, rows=100, cols=10)
-            ws.append_row(movimientos_headers)
+        if not os.path.exists(inventario_xls):
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = 'datos'
+            ws.append(inventario_headers)
+            wb.save(inventario_headers)
+            wb.close()
+
+        if not os.path.exists(movimientos_xls):
+            wb = openpyxl.Workbook()
+            ws = wb.active
+            ws.title = 'datos'
+            ws.append(movimientos_headers)
+            wb.save(movimientos_xls)
+            wb.close()
     except Exception as e:
-        st.error(f"Error verificando pestañas: {e}")
+        st.error(f"Error: {e}")
+
 
 def normalizar_fecha(fecha_obj) -> str:
-    if not fecha_obj: return ""
+    if not fecha_obj:
+        return ""
     try:
         if isinstance(fecha_obj, str):
             fecha_obj = fecha_obj.strip()
-            if ' ' in fecha_obj: fecha_obj = fecha_obj.split(' ')[0]
-            if 'T' in fecha_obj: fecha_obj = fecha_obj.split('T')[0]
+            if ' ' in fecha_obj:
+                fecha_obj = fecha_obj.split(' ')[0]
+            if 'T' in fecha_obj:
+                fecha_obj = fecha_obj.split('T')[0]
             return fecha_obj
         
         if hasattr(fecha_obj, 'strftime'):
             return fecha_obj.strftime("%Y-%m-%d")
         
         return str(fecha_obj).split(' ')[0]
-    except: return ""
+    except:
+        return ""
 
 def _convertir_a_numero(valor, por_defecto=0):
-    if valor is None or valor == '': return por_defecto
-    try: return int(valor)
+    if valor is None or valor == '':
+        return por_defecto
+    try:
+        return int(valor)
     except (ValueError, TypeError):
-        try: return float(valor)
-        except (ValueError, TypeError): return por_defecto
+        try:
+            return float(valor)
+        except (ValueError, TypeError):
+            return por_defecto
+        
 
 def stock_total(codigo: str) -> int:
     return sum(l["cantidad"] for l in inventario.get(codigo, []))
@@ -102,96 +124,153 @@ def ordenar_lotes_fifo(lotes):
             return (datetime.max, 1)
     return sorted(lotes, key=clave)
 
-def _escribir_sheet(ws_name, headers, datos):
-    """Sobreescribe una pestaña completa con nuevos datos"""
+def _escribir_xlsx(ruta, headers, filas):
     try:
-        sh = obtener_conexion()
-        ws = sh.worksheet(ws_name)
-        ws.clear()
-        ws.append_row(headers)
-        if datos:
-            datos_limpios = []
-            for fila in datos:
-                # Aseguramos que las listas tengan el mismo tamaño que el header
-                fila_expandida = list(fila) + ["" for _ in range(len(headers) - len(fila))]
-                fila_str = [str(celda) if celda is not None else "" for celda in fila_expandida[:len(headers)]]
-                datos_limpios.append(fila_str)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = 'datos'
+        
+        ws.append(headers)
 
-            ws.append_rows(datos_limpios, value_input_option='USER_ENTERED')
+        for fila in filas:
+            fila_limpia = []
+            for celda in fila:
+                if isinstance(celda, (datetime, pd.Timestamp)):
+                    fila_limpia.append(celda.isoformat())
+                else:
+                    fila_limpia.append(celda)
+            ws.append(fila_limpia)
+        
+        for c_idx, column_cells in enumerate(ws.columns, 1):
+            max_length = 0
+            column_letter = get_column_letter(c_idx)
+            for cell in column_cells:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = max(12, min(50, max_length + 2))
+            ws.column_dimensions[column_letter].width = adjusted_width
+
+        wb.save(ruta)
+        wb.close()
+    except PermissionError:
+         print(f"Error al guardar {ruta}.")
     except Exception as e:
-        st.error(f"Error guardando en {ws_name}: {e}")
+        print(f"Error al guardar {ruta}: {e}")
 
-# --- LOGICA DE NEGOCIO ---
-
-def cargar_todo():
-    """Carga datos desde Sheets a memoria. Se ejecuta en cada run de Streamlit."""
-    inventario.clear()
+def cargar_stock_min():
     stock_minimo.clear()
-    movimientos.clear()
+    if not os.path.exists(stock_minimo_xls):
+        return
     
-    sh = obtener_conexion()
-    check_worksheets(sh)
+    try:
+        wb = openpyxl.load_workbook(stock_minimo_xls, data_only = True)
+        ws = wb.active
+    except Exception:
+        return
+
+    for fila in ws.iter_rows(min_row=2, values_only=True):
+        if not fila or fila[0] is None:
+            continue
+        
+        try:
+            codigo = str(fila[0]).strip()
+            minimo = _convertir_a_numero(fila[1], por_defecto=0)
+            if codigo:
+                stock_minimo[codigo] = minimo
+        except Exception:
+            return
+    wb.close()
+
+def cargar_inventario():
+    inventario.clear()
+    if not os.path.exists(inventario_xls):
+        return
     
-    # 1. Cargar Inventario
     try:
-        ws_inv = sh.worksheet(INVENTARIO_WS)
-        vals_inv = ws_inv.get_all_values()
-        if len(vals_inv) > 1:
-            for fila in vals_inv[1:]: # Saltar header
-                fila += [""] * (len(inventario_headers) - len(fila))
-                codigo, nombre, marca, cant, fv, pc, pv = fila[:len(inventario_headers)]
-                
-                if not codigo: continue
-                
-                lote = {
-                    'nombre': nombre,
-                    'marca': marca,
-                    'cantidad': _convertir_a_numero(cant),
-                    'fecha_vencimiento': normalizar_fecha(fv),
-                    'precio_costo': _convertir_a_numero(pc),
-                    'precio_venta': _convertir_a_numero(pv)
-                }
-                
-                if codigo not in inventario: inventario[codigo] = []
-                inventario[codigo].append(lote)
-    except Exception as e: st.error(f"Error leyendo inventario: {e}")
+        wb = openpyxl.load_workbook(inventario_xls, data_only = True)
+        ws = wb.active
+    except Exception:
+        return
 
-    # 2. Cargar Stock Minimo
-    try:
-        ws_min = sh.worksheet(STOCK_MINIMO_WS)
-        vals_min = ws_min.get_all_values()
-        if len(vals_min) > 1:
-            for fila in vals_min[1:]:
-                if fila and fila[0]:
-                    stock_minimo[fila[0]] = _convertir_a_numero(fila[1] if len(fila)>1 else 0)
-    except Exception as e: st.error(f"Error leyendo stock minimo: {e}")
+    for fila in ws.iter_rows(min_row=2, values_only=True):
+        if not fila or fila[0] is None:
+            continue
+        
+        try:
+            datos = list(fila) + [None]*(7 - len(fila))
+            codigo, nombre, marca, cantidad, fecha_vencimiento, precio_costo, precio_venta = datos[:7]
+        except ValueError as e:
+            continue
 
-    # 3. Cargar Movimientos
-    try:
-        ws_mov = sh.worksheet(MOVIMIENTOS_WS)
-        vals_mov = ws_mov.get_all_values()
-        if len(vals_mov) > 1:
-            # Los movimientos se cargan como lista de listas
-            for fila in vals_mov[1:]:
-                movimientos.append(fila[:len(movimientos_headers)])
-    except Exception as e: st.error(f"Error leyendo movimientos: {e}")
-    
-    st.session_state['data_loaded'] = True
+        cantidad = _convertir_a_numero(cantidad, por_defecto=0)
+        precio_costo = _convertir_a_numero(precio_costo, por_defecto=0)
+        precio_venta = _convertir_a_numero(precio_venta, por_defecto=0)
+        
+        fecha_str = normalizar_fecha(fecha_vencimiento)
+        
+        lote = {
+            'nombre': str(nombre),
+            'marca': str(marca),
+            'cantidad': cantidad,
+            'fecha_vencimiento': fecha_str,
+            'precio_costo': precio_costo,
+            'precio_venta': precio_venta
+        }
 
-# Funciones de guardado
+        codigo_str = str(codigo).strip()
+        if codigo_str not in inventario:
+            inventario[codigo_str] = []
+        inventario[codigo_str].append(lote)
+    wb.close()
+
 def guardar_inventario():
+    
     filas = []
     for codigo, lotes in inventario.items():
         for d in lotes:
             filas.append([
-                codigo, d.get('nombre',""), d.get('marca',""), d.get('cantidad',0),
-                d.get('fecha_vencimiento',""), d.get('precio_costo',0), d.get('precio_venta',0)
+                codigo,
+                d.get('nombre',""),
+                d.get('marca',""),
+                d.get('cantidad',0),
+                d.get('fecha_vencimiento',""),
+                d.get('precio_costo',""),
+                d.get('precio_venta',""),
             ])
-    _escribir_sheet(INVENTARIO_WS, inventario_headers, filas)
+    _escribir_xlsx(inventario_xls, inventario_headers, filas)
 
 def guardar_stock_minimo():
-    filas = [[k, v] for k, v in stock_minimo.items()]
-    _escribir_sheet(STOCK_MINIMO_WS, stock_minimo_headers, filas)
+    filas = []
+    for codigo, minimo in stock_minimo.items():
+        filas.append([codigo, minimo])
+
+    _escribir_xlsx(stock_minimo_xls, stock_minimo_headers, filas)
+
+
+def cargar_movimientos():
+    movimientos.clear()
+    if not os.path.exists(movimientos_xls):
+        return
+
+    try:
+        wb = openpyxl.load_workbook(movimientos_xls, data_only = True)
+        ws = wb.active
+    except Exception:
+        return
+    
+    for fila_tupla in ws.iter_rows(min_row=2, values_only=True):
+        if not fila_tupla or not fila_tupla[0]:
+            continue
+        movimientos.append(list(fila_tupla))
+        
+    wb.close()    
+        
+def guardar_movimientos():
+    _escribir_xlsx(movimientos_xls, movimientos_headers, movimientos)
+
 
 def registrar_movimiento(tipo, codigo, nombre, cantidad, fecha_vencimiento, precio_costo, precio_venta):
     nueva_fila = [
@@ -204,25 +283,16 @@ def registrar_movimiento(tipo, codigo, nombre, cantidad, fecha_vencimiento, prec
         precio_costo if precio_costo is not None else 0,
         precio_venta if precio_venta is not None else 0,
     ]
-    # Optimización: Append directo en lugar de reescribir todo
-    try:
-        sh = obtener_conexion()
-        ws = sh.worksheet(MOVIMIENTOS_WS)
-        # Convertir a string para evitar errores
-        fila_str = [str(x) for x in nueva_fila]
-        ws.append_row(fila_str)
-        movimientos.append(nueva_fila) # Actualizar local también
-    except Exception as e:
-        st.error(f"Error registrando movimiento: {e}")
+    movimientos.append(nueva_fila)
+    guardar_movimientos()
 
-# --- INICIALIZACIÓN ---
-if 'data_loaded' not in st.session_state:
-    cargar_todo()
-else:
-    # Recargar datos en cada run para reflejar cambios
-    cargar_todo()
 
-# --- INTERFAZ STREAMLIT ---
+iniciarlizar_archivos()
+cargar_inventario()
+cargar_movimientos()
+cargar_stock_min()
+
+
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Registrar Entrada", "Registrar Salida", "Mostrar Inventario", "Reporte de Movimientos", "Reporte de Niveles de Stock", "Reporte de Alertas de Vencimiento"])
 
 with tab1:
@@ -232,6 +302,17 @@ with tab1:
         st.session_state.reset_counter = 0
 
     input_key = f"entrada_input_{st.session_state.reset_counter}"
+
+    st.markdown(f"""
+        <script>
+        function focusInput() {{
+            const inputs = window.parent.document.querySelectorAll('input[type="text"]');
+            if (inputs.length > 0) {{ inputs[0].focus(); }}
+        }}
+        setTimeout(focusInput, 200);
+        </script>
+    """, unsafe_allow_html=True)
+
 
     entrada = st.text_input("Escanee el código o esciba 'buscar': ", key=input_key)
     
@@ -256,17 +337,21 @@ with tab1:
             seleccion = st.selectbox("Seleccione un producto", opciones)
 
             if seleccion == 'Cancelar':
+                st.info("Selección cancelada")
                 codigo_seleccionado = None
             else:
                 idx = opciones.index(seleccion) - 1
                 codigo_seleccionado = productos_lista[idx][0]
-                st.success(f"Se seleleccionó: {productos_lista[idx][1]} (Codigo: {codigo_seleccionado})")
+                st.success(f"Se seleleccionó: {productos_lista[idx][1]} (Codigo: {codigo})")
         else:
             codigo_seleccionado = entrada
 
     if codigo_seleccionado:
         es_nuevo = codigo_seleccionado not in inventario
-        no_tiene_min = codigo_seleccionado not in stock_minimo or stock_minimo[codigo_seleccionado] is None
+        if codigo_seleccionado in stock_minimo:
+            no_tiene_min = stock_minimo[codigo_seleccionado] is None
+        else:
+            no_tiene_min = True
 
         if es_nuevo:
             st.info(f"El código {codigo_seleccionado} no se encuentra en el inventario. Se creará un nuevo producto")
@@ -351,7 +436,7 @@ with tab2:
         if "*" in codigo_sin_procesar:
             try:
                 partes = codigo_sin_procesar.split("*", 1)
-                cantidad = _convertir_a_numero(partes[0].strip(), por_defecto=1)
+                cantidad = int(partes[0].strip())
                 codigo_producto = partes[1].strip()
             except:
                 codigo_producto = codigo_sin_procesar.strip()
@@ -378,8 +463,27 @@ with tab2:
 
         st.session_state.codigo = ""
 
+    def enfoque_automatico():
+        st.markdown(
+            """
+        <script>
+        function focusInput(){
+            try {
+                const input = window.parent.document.querySelector('input[aria-label="Escanee el código del producto (Si son varios, ej: 5*7806505055391)"]');
+                if (input) {
+                    input.focus();
+                }
+            } catch(e) { console.error('Error al enfocar:', e); }
+        }
+        setTimeout(focusInput, 100);
+        </script>
+        """,
+        unsafe_allow_html=True
+        )
+
     st.subheader("Registro de Salidas")
     st.text_input("Escanee el código del producto (Si son varios, ej: 5*7806505055391)", key="codigo", on_change=procesar_codigo_escaneado)
+    enfoque_automatico()
 
     st.divider()
     st.subheader("Lista Actual de Productos")
@@ -427,256 +531,242 @@ with tab2:
             st.success("Salidas registradas correctamente")
             st.rerun() 
 
-# === TAB 3: MOSTRAR INVENTARIO ===
 with tab3:
     st.subheader("Inventario Completo")
-    
-    # Lógica para cargar el DataFrame directamente desde Google Sheets (REEMPLAZANDO pd.read_excel)
-    try:
-        sh = obtener_conexion()
-        ws_inv = sh.worksheet(INVENTARIO_WS)
-        data = ws_inv.get_all_values()
-        
-        if len(data) > 1:
-            df_inv = pd.DataFrame(data[1:], columns=data[0])
-            # Convertir cantidad a numérico
-            df_inv['cantidad'] = df_inv['cantidad'].apply(_convertir_a_numero)
-        else:
-            st.warning("No hay datos en la hoja de inventario.")
-            df_inv = pd.DataFrame(columns=inventario_headers)
+    if os.path.exists(inventario_xls):
+        try:
+            df_inv = pd.read_excel(inventario_xls, engine='openpyxl')
+            
+            busqueda = st.text_input("🔍 Buscar producto (Nombre, Marca o Código):", key="search_inv")
 
-        busqueda = st.text_input("🔍 Buscar producto (Nombre, Marca o Código):", key="search_inv")
+            if busqueda:
+                codigo = df_inv['codigo'].astype(str).str.contains(busqueda, case=False, na=False)
+                df_inv = df_inv[codigo]
 
-        if busqueda:
-            busqueda_lower = busqueda.lower()
-            filtro = (df_inv['codigo'].astype(str).str.contains(busqueda_lower, case=False, na=False)) | \
-                     (df_inv['nombre'].astype(str).str.contains(busqueda_lower, case=False, na=False)) | \
-                     (df_inv['marca'].astype(str).str.contains(busqueda_lower, case=False, na=False))
-            df_filtrado = df_inv[filtro]
-        else:
-            df_filtrado = df_inv
+            
+            st.dataframe(
+                df_inv, 
+                width="stretch", 
+                height=500,
+                hide_index=True,
+                column_config={
+                    'codigo': st.column_config.TextColumn("Código"),
+                    'nombre': st.column_config.TextColumn("Nombre"),
+                    'marca': st.column_config.TextColumn("Marca"),
+                    "fecha_vencimiento": st.column_config.TextColumn("Fecha de Vencimiento"),
+                    "cantidad": st.column_config.NumberColumn("Stock"),
+                    "precio_costo": st.column_config.NumberColumn("P. Costo", format="$%d"),
+                    "precio_venta": st.column_config.NumberColumn("P. Venta", format="$%d"),
+                }
+            )
+            
+            st.caption(f"Stock Total: {stock_total(busqueda)}")
 
-        
-        st.dataframe(
-            df_filtrado, 
-            width="stretch", 
-            height=500,
-            hide_index=True,
-            column_config={
-                'codigo': st.column_config.TextColumn("Código"),
-                'nombre': st.column_config.TextColumn("Nombre"),
-                'marca': st.column_config.TextColumn("Marca"),
-                "fecha_vencimiento": st.column_config.TextColumn("Fecha de Vencimiento"),
-                "cantidad": st.column_config.NumberColumn("Stock"),
-                "precio_costo": st.column_config.NumberColumn("P. Costo", format="$%d"),
-                "precio_venta": st.column_config.NumberColumn("P. Venta", format="$%d"),
-            }
-        )
-        
-    except Exception as e:
-        st.error(f"Error al cargar la hoja de inventario desde Google Sheets: {e}")
+        except Exception as e:
+            st.error(f"Error al leer archivo Excel: {e}")
+    else:
+        st.warning("No hay archivo de inventario.")
 
-# === TAB 4: REPORTE MOVIMIENTOS ===
 with tab4:
     st.subheader("Reporte de Movimientos: ")
     col_izq, col_der = st.columns(2)
 
     with col_izq:
+
+        nombre_seleccionado = None
         productos_lista = []
         for codigo, lotes in inventario.items():
             if lotes:
                 base = lotes[0]
-                productos_lista.append((codigo, base.get('nombre') or 'N/A', base.get('marca') or 'N/A'))
+                nombre = base.get('nombre') or 'N/A'
+                marca = base.get('marca') or 'N/A'
+                productos_lista.append((codigo, nombre, marca))
+            
         productos_lista.sort(key=lambda x: x[1])
 
-        opciones = [f"{i+1}) {nombre} - {marca} (Código: {codigo})" for i, (codigo, nombre, marca) in enumerate(productos_lista)]
+        opciones = [f"{i+1}) {nombre} - {marca} (Código: {codigo})" 
+                            for i, (codigo, nombre, marca) in enumerate(productos_lista)]
+        
         opciones.insert(0, "Cancelar")
         opciones.insert(1, 'Todos los productos')
-        seleccion = st.selectbox("Seleccione un producto", opciones, key="mov_prod_sel")
+        seleccion = st.selectbox("Seleccione un producto", opciones)
 
-        codigo_seleccionado = None
+
         if seleccion == 'Cancelar':
-            pass
+            st.info("Selección cancelada")
         elif seleccion == 'Todos los productos':
-            pass
+            nombre_seleccionado = None
         else:
             idx = opciones.index(seleccion) - 2
-            codigo_seleccionado = productos_lista[idx][0]
+            codigo = productos_lista[idx][0]
+            nombre_seleccionado = productos_lista[idx][1]
+            st.success(f"Se seleleccionó: {productos_lista[idx][1]} (Codigo: {codigo})")
 
-        fecha_inicio = st.date_input("Ingrese la fecha de inicio: ", key="mov_f_ini")
-        fecha_fin = st.date_input("Ingrese la fecha de fin: ", key="mov_f_fin")
+        fecha_inicio = st.date_input("Ingrese la fecha de inicio: ")
+        fecha_fin = st.date_input("Ingrese la fecha de fin: ")
 
-        tipo_movimiento = st.multiselect("Seleccione el tipo de movimiento", ["entrada", "salida"], key="tipo_movimiento")
+        tipo_movimiento = st.multiselect("Seleccione el tipo de movimiento", ["Entrada", "Salida"], key="tipo_movimiento")
 
     if col_izq.button("Mostrar Movimientos: "):
-        if not movimientos:
-            col_izq.info("No hay movimientos registrados.")
-        else:
-            try:
-                # Usar la lista global de movimientos cargada desde Sheets
-                df = pd.DataFrame(movimientos, columns=movimientos_headers)
+        try:
+            df = pd.read_excel(movimientos_xls)
+        
             
-                df['timestamp'] = pd.to_datetime(df['timestamp'], errors='coerce')
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            fecha_inicio = pd.to_datetime(fecha_inicio)
+            fecha_fin = pd.to_datetime(fecha_fin) + pd.Timedelta(days=1)
+            df_filtrado = df.loc[(df["timestamp"] >= fecha_inicio) & (df["timestamp"] < fecha_fin)]
+            df_filtrado['datetime'] = df_filtrado['timestamp']
+
+            tipo_movimiento = [tipo.lower() for tipo in tipo_movimiento]
+
+            if tipo_movimiento:
+                df_filtrado = df_filtrado[df_filtrado['tipo'].isin(tipo_movimiento)]
+
+            if nombre_seleccionado is not None:
+                df_filtrado = df_filtrado[df_filtrado['nombre'] == nombre_seleccionado]
+
+            df_filtrado['fecha'] = df_filtrado['timestamp'].dt.date
+            df_filtrado['hora'] = df_filtrado['timestamp'].dt.time
+
+
+            columnas_finales = ["fecha", 'hora', "tipo", "nombre", "cantidad"]
+            columnas_finales = [c for c in columnas_finales if c in df_filtrado.columns]
+
+            df_filtrado = df_filtrado.rename(columns = {'fecha': 'Fecha', 'hora': "Hora", "tipo": "Tipo", "nombre": "Nombre", "cantidad": "Cantidad"})
+            
+            nuevos_nombres = ["Fecha", 'Hora', "Tipo", "Nombre", "Cantidad"]
+            nuevos_nombres = [c for c in nuevos_nombres if c in df_filtrado.columns]
+
+
+            if 'entrada' in tipo_movimiento and 'salida' in tipo_movimiento:
+                col_izq.write("Entrada y Salida")
+                df_e = df_filtrado[df_filtrado['Tipo'] == 'entrada']
+
+                fig1, ax1 = plt.subplots(figsize=(10, 5))
+                ax1.scatter(df_e["timestamp"], df_e["Cantidad"], alpha=0.7, edgecolor="k")
+
+                ax1.set_xlabel("Fecha / Hora")
+                ax1.set_ylabel("Cantidad")
+                ax1.set_title(f"Entradas de {productos_lista[idx][1]}")
+                ax1.grid(True)
+                col_der.pyplot(fig1)
                 
-                fecha_inicio = pd.to_datetime(fecha_inicio)
-                fecha_fin = pd.to_datetime(fecha_fin) + pd.Timedelta(days=1)
-                
-                df_filtrado = df.loc[(df["timestamp"] >= fecha_inicio) & (df["timestamp"] < fecha_fin)].copy()
-                df_filtrado['cantidad'] = df_filtrado['cantidad'].apply(_convertir_a_numero)
+                df_s = df_filtrado[df_filtrado['Tipo'] == 'salida']
 
-                if tipo_movimiento:
-                    df_filtrado = df_filtrado[df_filtrado['tipo'].isin(tipo_movimiento)]
+                fig2, ax2 = plt.subplots(figsize=(10, 5))
+                ax2.scatter(df_s["timestamp"], df_s["Cantidad"], alpha=0.7, edgecolor="k")
 
-                if codigo_seleccionado is not None:
-                    df_filtrado = df_filtrado[df_filtrado['codigo'] == codigo_seleccionado]
+                ax2.set_xlabel("Fecha / Hora")
+                ax2.set_ylabel("Cantidad")
+                ax2.set_title(f"Salidas de {productos_lista[idx][1]}")
+                ax2.grid(True)
+                col_der.pyplot(fig2)
 
-                df_filtrado['fecha'] = df_filtrado['timestamp'].dt.date
-                df_filtrado['hora'] = df_filtrado['timestamp'].dt.time
+            elif 'salida' in tipo_movimiento:
+                col_izq.write("Salida")
+                df_s = df_filtrado[df_filtrado['Tipo'] == 'salida']
 
-                columnas_finales = ["fecha", 'hora', "tipo", "nombre", "cantidad"]
-                columnas_finales = [c for c in columnas_finales if c in df_filtrado.columns]
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.scatter(df_s["timestamp"], df_s["Cantidad"], alpha=0.7, edgecolor="k")
 
-                df_filtrado = df_filtrado.rename(columns = {'fecha': 'Fecha', 'hora': "Hora", "tipo": "Tipo", "nombre": "Nombre", "cantidad": "Cantidad"})
-                
-                nuevos_nombres = ["Fecha", 'Hora', "Tipo", "Nombre", "Cantidad"]
-                nuevos_nombres = [c for c in nuevos_nombres if c in df_filtrado.columns]
+                ax.set_xlabel("Fecha / Hora")
+                ax.set_ylabel("Cantidad")
+                ax.set_title(f"Salidas de {productos_lista[idx][1]}")
+                ax.grid(True)
+                col_der.pyplot(fig)
+            else:
+                col_izq.write("Entrada")
+                df_e = df_filtrado[df_filtrado['Tipo'] == 'entrada']
 
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ax.scatter(df_e["timestamp"], df_e["Cantidad"], alpha=0.7, edgecolor="k")
 
-                if 'entrada' in tipo_movimiento and 'salida' in tipo_movimiento:
-                    df_e = df_filtrado[df_filtrado['Tipo'] == 'entrada']
-                    df_s = df_filtrado[df_filtrado['Tipo'] == 'salida']
+                ax.set_xlabel("Fecha / Hora")
+                ax.set_ylabel("Cantidad")
+                ax.set_title(f"Entradas de {productos_lista[idx][1]}")
+                ax.grid(True)
+                col_der.pyplot(fig)
+        except:
+            pass
 
-                    if not df_e.empty:
-                        fig1, ax1 = plt.subplots(figsize=(10, 5))
-                        ax1.scatter(df_e["timestamp"], df_e["Cantidad"], alpha=0.7, edgecolor="k")
-                        ax1.set_xlabel("Fecha / Hora")
-                        ax1.set_ylabel("Cantidad")
-                        ax1.set_title(f"Entradas de {productos_lista[idx][1] if codigo_seleccionado else 'Varios'}")
-                        ax1.grid(True)
-                        col_der.pyplot(fig1)
-                    
-                    if not df_s.empty:
-                        fig2, ax2 = plt.subplots(figsize=(10, 5))
-                        ax2.scatter(df_s["timestamp"], df_s["Cantidad"], alpha=0.7, edgecolor="k")
-                        ax2.set_xlabel("Fecha / Hora")
-                        ax2.set_ylabel("Cantidad")
-                        ax2.set_title(f"Salidas de {productos_lista[idx][1] if codigo_seleccionado else 'Varios'}")
-                        ax2.grid(True)
-                        col_der.pyplot(fig2)
+        if nombre_seleccionado is not None:
+            col_izq.markdown("### Tabla de Movimientos")
+            col_izq.table(df_filtrado[nuevos_nombres])
+        else:
+            col_der.markdown("### Tabla de Movimientos")
+            col_der.table(df_filtrado[nuevos_nombres])
+        
 
-                elif 'salida' in tipo_movimiento:
-                    df_s = df_filtrado[df_filtrado['Tipo'] == 'salida']
-                    if not df_s.empty:
-                        fig, ax = plt.subplots(figsize=(10, 5))
-                        ax.scatter(df_s["timestamp"], df_s["Cantidad"], alpha=0.7, edgecolor="k")
-                        ax.set_xlabel("Fecha / Hora")
-                        ax.set_ylabel("Cantidad")
-                        ax.set_title(f"Salidas de {productos_lista[idx][1] if codigo_seleccionado else 'Varios'}")
-                        ax.grid(True)
-                        col_der.pyplot(fig)
-                else: # Incluye solo 'entrada' o vacío
-                    df_e = df_filtrado[df_filtrado['Tipo'] == 'entrada']
-                    if not df_e.empty:
-                        fig, ax = plt.subplots(figsize=(10, 5))
-                        ax.scatter(df_e["timestamp"], df_e["Cantidad"], alpha=0.7, edgecolor="k")
-                        ax.set_xlabel("Fecha / Hora")
-                        ax.set_ylabel("Cantidad")
-                        ax.set_title(f"Entradas de {productos_lista[idx][1] if codigo_seleccionado else 'Varios'}")
-                        ax.grid(True)
-                        col_der.pyplot(fig)
-
-                if codigo_seleccionado is not None:
-                    col_izq.markdown("### Tabla de Movimientos")
-                    col_izq.table(df_filtrado[nuevos_nombres])
-                else:
-                    col_der.markdown("### Tabla de Movimientos")
-                    col_der.table(df_filtrado[nuevos_nombres])
-            except Exception as e:
-                col_izq.error(f"Error al procesar movimientos: {e}")
-
-# === TAB 5: STOCK ===
 with tab5:
     st.subheader("Reporte de Niveles de Stock: ")
+    if os.path.exists(stock_minimo_xls):
+        try:
+            df_stock_min = pd.read_excel(stock_minimo_xls, engine='openpyxl')
+            df_inv = pd.read_excel(inventario_xls, engine='openpyxl')
+            
+            df_inv_sin_lotes = df_inv.groupby(['codigo', 'nombre'], as_index=False)['cantidad'].sum()
+            df_inv_sin_lotes = df_inv_sin_lotes.rename(columns = {'cantidad': 'stock_total_calc'})
 
-    # Construir DF de inventario desde la memoria
-    data_rows = []
-    for c, lotes in inventario.items():
-        if lotes:
-            base = lotes[0]
-            data_rows.append({
-                'codigo': c,
-                'nombre': base.get('nombre'),
-                'stock_total_calc': stock_total(c)
-            })
-    df_inv_sin_lotes = pd.DataFrame(data_rows)
-    
-    # Construir DF de stock mínimo desde la memoria
-    df_stock_min = pd.DataFrame(list(stock_minimo.items()), columns=['codigo', 'stock_min'])
-    df_stock_min['stock_min'] = df_stock_min['stock_min'].apply(_convertir_a_numero)
-    
-    if not df_inv_sin_lotes.empty:
-        df_reporte = pd.merge(
-            df_stock_min,
-            df_inv_sin_lotes[['codigo', 'nombre', 'stock_total_calc']],
-            on = 'codigo',
-            how = 'outer'
-        )
+            df_reporte = pd.merge(
+                df_stock_min,
+                df_inv_sin_lotes[['codigo', 'nombre', 'stock_total_calc']],
+                on = 'codigo',
+                how = 'left'
+            )
 
-        df_reporte['stock_total_calc'] = df_reporte['stock_total_calc'].fillna(0).astype(int)
-        df_reporte['stock_min'] = df_reporte['stock_min'].fillna(0).astype(int)
-        df_reporte['nombre'] = df_reporte['nombre'].fillna('Sin nombre')
-        df_reporte = df_reporte.dropna(subset=['codigo']) # Limpiar códigos nulos
-
-        def semaforo(fila):
-            total = fila['stock_total_calc']
-            minimo = fila['stock_min']
-
-            if total <= minimo:
-                return "🔴 Crítico"
-            elif total <= 1.5*minimo:
-                return "🟡 Advertencia"
-            else:
-                return "🟢 Óptimo"
-
-        df_reporte['Estado'] = df_reporte.apply(semaforo, axis = 1)
-        df_reporte = df_reporte.sort_values(by=['Estado', 'stock_total_calc'], ascending=[False, True])
+            
+            df_reporte['stock_total_calc'] = df_reporte['stock_total_calc'].fillna(0)
+            df_reporte['nombre'] = df_reporte['nombre'].fillna('Sin nombre')
 
 
-        busqueda = st.text_input("🔍 Buscar producto (Código):", key="search_stock_min")
+            def semaforo(fila):
+                total = fila['stock_total_calc']
+                minimo = fila['stock_min']
 
-        if busqueda:
-            codigo = df_reporte['codigo'].astype(str).str.contains(busqueda, case=False, na=False)
-            df_reporte = df_reporte[codigo]
-        
-        # Eliminar duplicados de códigos que podrían generarse en el merge (solo mantener uno)
-        df_reporte = df_reporte.drop_duplicates(subset=['codigo'])
+                if total <= minimo:
+                    return "🔴"
+                elif total <= 1.5*minimo:
+                    return "🟡"
+                else:
+                    return "🟢"
 
-        st.dataframe(
-            df_reporte, 
-            width="stretch", 
-            height="stretch",
-            hide_index=True,
-            column_config={
-                'codigo': st.column_config.TextColumn("Código"),
-                'nombre': st.column_config.TextColumn("Nombre"),
-                "stock_min": st.column_config.NumberColumn("Stock Mínimo"),
-                'stock_total_calc': st.column_config.NumberColumn("Stock Actual"),
-                'Estado': st.column_config.TextColumn("Estado")
-            },
-            column_order=("codigo", 'nombre', 'stock_min', 'stock_total_calc', 'Estado')
-        )
+            df_reporte['semaforo'] = df_reporte.apply(semaforo, axis = 1)
+
+            busqueda = st.text_input("🔍 Buscar producto (Código):", key="search_stock_min")
+
+            if busqueda:
+                codigo = df_reporte['codigo'].astype(str).str.contains(busqueda, case=False, na=False)
+                df_reporte = df_reporte[codigo]
+            
+
+            st.dataframe(
+                df_reporte, 
+                width="stretch", 
+                height="stretch",
+                hide_index=True,
+                column_config={
+                    'codigo': st.column_config.TextColumn("Código"),
+                    'nombre': st.column_config.TextColumn("Nombre"),
+                    "stock_min": st.column_config.NumberColumn("Stock Mínimo"),
+                    'stock_total_calc': st.column_config.NumberColumn("Stock Total Calculado"),
+                    'semaforo': st.column_config.TextColumn("Estado")
+                },
+                column_order=("codigo", 'nombre', 'stock_min', 'stock_total_calc', 'semaforo')
+            )
+            
+        except Exception as e:
+            st.error(f"Error al leer archivo Excel: {e}")
     else:
-        st.warning("No hay productos en el inventario para reportar niveles de stock.")
+        st.warning("No hay archivo de inventario.")
 
 
-# === TAB 6: VENCIMIENTOS ===
 with tab6:
     st.subheader("Reporte de Alertas de Vencimiento: ")
     
-    col_v1, col_v2, col_v3 = st.columns(3)
-    alerta_critica = col_v1.slider("Días Críticos (🔴)", 0, 130, 3)
-    alerta_adv = col_v2.slider("Días Advertencia (🟡)", 0, 130, 7)
-    alerta_preventiva = col_v3.slider("Días Preventivos (🟠)", 0, 130, 12)
+    alerta_critica = st.slider("Ingrese los días para las Alertas Críticas", 0, 130, 3)
+    alerta_adv = st.slider("Ingrese los días para las Alertas de Advertencia", 0, 130, 7)
+    alerta_preventiva = st.slider("Ingrese los días para las Alertas Preventivas", 0, 130, 12)
 
     hoy = datetime.now().date()
 
@@ -693,22 +783,20 @@ with tab6:
             if fv:
                 try:
                     fv_date = datetime.strptime(fv, "%Y-%m-%d").date()
-                    dias_restantes = (fv_date - hoy).days
-
-                    if dias_restantes < 0:
-                        estado = 'Vencido ❌'
-                    elif dias_restantes <= alerta_critica:
-                        estado = 'Alerta Crítica 🔴'
-                    elif  dias_restantes <= alerta_adv:
-                        estado = 'Alerta de Advertencia 🟡'
-                    elif dias_restantes <= alerta_preventiva:
-                        estado = 'Alerta Preventiva 🟠'
+                    if fv_date <= hoy:
+                        estado = 'Vencido'
+                    elif fv_date <= limite_crit:
+                        estado = 'Alerta Crítica'
+                    elif  fv_date <= limite_adv:
+                        estado = 'Alerta de Advertencia'
+                    elif fv_date <= limite_prev:
+                        estado = 'Alerta Preventiva'
 
                     if estado:
                         alertas.append({
                             'Estado': estado,
                             'Fecha de Vencimiento': fv,
-                            'Días restantes': dias_restantes,
+                            'Días restantes': (fv_date - hoy).days,
                             'Nombre': lote['nombre'],
                             'Cantidad del lote': lote['cantidad'],
                             'Código': codigo
