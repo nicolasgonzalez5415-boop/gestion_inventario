@@ -4,7 +4,7 @@ import gspread
 from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 import numpy as np
-
+#xd
 # --- CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(
     layout="wide", 
@@ -716,3 +716,4 @@ with tab6:
         )
     else:
         st.success("✅ No hay productos próximos a vencer según los rangos seleccionados.")
+
